@@ -1,0 +1,18 @@
+Commands I ran to get the godoc container working
+
+#command to build the image
+docker build -f godoc/Dockerfile -t godoc .
+
+#command to run a docker container. Note the -t option is for attaching current terminal to it so that signals like CTRL-C works.
+docker run --rm -d -t -p 6060:6060 godoc:latest
+
+
+#list all running docker containers
+docker ps
+
+#get a bash shell in a running container
+docker exec -it --tty <id-from-above-command> bash
+
+# run container with additional args
+docker run --rm -d -t -p 6061:6060 godoc:latest /bin/bash fetch_serve.sh github.com kubernetes-sigs controller-runtime 15:w
+

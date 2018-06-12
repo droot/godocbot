@@ -1,0 +1,6 @@
+apiVersion: code.godocs.io/v1alpha1
+kind: PullRequest
+metadata:
+  name: pullrequest-example
+spec:
+  url: "https://github.com/kubernetes-sigs/controller-runtime/pull/21" 
