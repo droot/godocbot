@@ -42,7 +42,7 @@ func (r *PullRequestReconciler) Reconcile(request reconcile.Request) (reconcile.
 	dp := &appsv1.Deployment{}
 	err = r.Client.Get(ctx, request.NamespacedName, dp)
 	if errors.IsNotFound(err) {
-		log.Printf("Could not find deployment for PullRequest %v. creating\n", request)
+		log.Printf("Could not find deployment for PullRequest %v. creating deployment", request)
 
 		dp, err = deploymentForPullRequest(pr)
 		if err != nil {
@@ -53,10 +53,18 @@ func (r *PullRequestReconciler) Reconcile(request reconcile.Request) (reconcile.
 			log.Printf("error creating new deployment for PullRequest: %v %v", request, err)
 			return reconcile.Result{}, err
 		}
+		log.Printf("created deployment for %v successfully", request.NamespacedName)
 	}
 
 	if pr.Status.GoDocLink == "" && dp.Status.AvailableReplicas > 0 {
+		log.Printf("deployment became available, updating the godoc link")
 		// update the status
+		prinfo, _ := parsePullRequestURL(pr.Spec.URL)
+		pr.Status.GoDocLink = fmt.Sprintf("https://%s.serveo.net/pkg/%s/%s/%s", prinfo.subdomain(), prinfo.host, prinfo.org, prinfo.repo)
+		if err = r.Client.Update(ctx, pr); err != nil {
+			return reconcile.Result{}, err
+		}
+		log.Printf("godoc link updated successfully for pr %v", request.NamespacedName)
 	}
 
 	// reconcile the dp with pr now.
@@ -80,8 +88,7 @@ func deploymentForPullRequest(pr *v1alpha1.PullRequest) (*appsv1.Deployment, err
 	}
 
 	tunnelArgs := "80:localhost:6060"
-	subdomain := fmt.Sprintf("%s-%s-%s", prinfo.org, prinfo.repo, prinfo.pr)
-	tunnelArgs = fmt.Sprintf("%s:%s", subdomain, tunnelArgs)
+	tunnelArgs = fmt.Sprintf("%s:%s", prinfo.subdomain(), tunnelArgs)
 
 	dep := &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
@@ -164,4 +171,9 @@ func parsePullRequestURL(prURL string) (*prInfo, error) {
 		pr:   parts[3],
 	}, nil
 
+}
+
+// helper function to generate subdomain for the prinfo.
+func (pr *prInfo) subdomain() string {
+	return fmt.Sprintf("%s-%s-pr-%s", pr.org, pr.repo, pr.pr)
 }

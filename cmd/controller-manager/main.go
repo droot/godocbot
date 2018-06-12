@@ -59,7 +59,7 @@ func main() {
 	err = c.Watch(
 		&source.KindSource{Type: &appsv1.Deployment{}},
 		&eventhandler.EnqueueOwnerHandler{
-			OwnerType:    &appsv1.Deployment{},
+			OwnerType:    &v1alpha1.PullRequest{},
 			IsController: true,
 		},
 	)
