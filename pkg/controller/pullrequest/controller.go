@@ -170,7 +170,6 @@ func parsePullRequestURL(prURL string) (*prInfo, error) {
 		repo: parts[1],
 		pr:   parts[3],
 	}, nil
-
 }
 
 // helper function to generate subdomain for the prinfo.

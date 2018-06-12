@@ -183,3 +183,7 @@ name = "github.com/kubernetes-sigs/kubebuilder"
 version="0.1.11"
 
 
+
+[[constraint]]
+  name = "github.com/google/go-github"
+  version = "15.0.0"
