@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"strconv"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -15,11 +16,11 @@ import (
 
 	"github.com/droot/godocbot/pkg/apis/code/v1alpha1"
 	"github.com/kubernetes-sigs/controller-runtime/pkg/client"
-	"github.com/kubernetes-sigs/controller-runtime/pkg/controller/reconcile"
+	"github.com/kubernetes-sigs/controller-runtime/pkg/reconcile"
 )
 
 type PullRequestReconciler struct {
-	Client client.Interface
+	Client client.Client
 }
 
 func (r *PullRequestReconciler) Reconcile(request reconcile.Request) (reconcile.Result, error) {
@@ -39,6 +40,11 @@ func (r *PullRequestReconciler) Reconcile(request reconcile.Request) (reconcile.
 		return reconcile.Result{}, err
 	}
 
+	if pr.Spec.CommitID == "" {
+		log.Printf("Waiting for PR %s commitID to be updated", request.NamespacedName)
+		return reconcile.Result{}, nil
+	}
+
 	dp := &appsv1.Deployment{}
 	err = r.Client.Get(ctx, request.NamespacedName, dp)
 	if errors.IsNotFound(err) {
@@ -56,12 +62,25 @@ func (r *PullRequestReconciler) Reconcile(request reconcile.Request) (reconcile.
 		log.Printf("created deployment for %v successfully", request.NamespacedName)
 	}
 
+	prinfo, _ := parsePullRequestURL(pr.Spec.URL)
+	prinfo.commitID = pr.Spec.CommitID
+
+	if len(dp.Spec.Template.Spec.Containers[0].Args) <= 5 || (pr.Spec.CommitID != dp.Spec.Template.Spec.Containers[0].Args[5]) {
+		// deployment is not updated with latest commit-id
+		dpCopy := dp.DeepCopy()
+		dpCopy.Spec.Template.Spec.Containers[0].Args = prinfo.godocContainerArgs()
+		if err = r.Client.Update(ctx, dpCopy); err != nil {
+			log.Printf("error updating the deployment for key %s", request.NamespacedName)
+			return reconcile.Result{}, err
+		}
+	}
+
 	if pr.Status.GoDocLink == "" && dp.Status.AvailableReplicas > 0 {
 		log.Printf("deployment became available, updating the godoc link")
 		// update the status
-		prinfo, _ := parsePullRequestURL(pr.Spec.URL)
-		pr.Status.GoDocLink = fmt.Sprintf("https://%s.serveo.net/pkg/%s/%s/%s", prinfo.subdomain(), prinfo.host, prinfo.org, prinfo.repo)
-		if err = r.Client.Update(ctx, pr); err != nil {
+		prCopy := pr.DeepCopy()
+		prCopy.Status.GoDocLink = fmt.Sprintf("https://%s.serveo.net/pkg/%s/%s/%s", prinfo.subdomain(), prinfo.host, prinfo.org, prinfo.repo)
+		if err = r.Client.Update(ctx, prCopy); err != nil {
 			return reconcile.Result{}, err
 		}
 		log.Printf("godoc link updated successfully for pr %v", request.NamespacedName)
@@ -81,6 +100,7 @@ func deploymentForPullRequest(pr *v1alpha1.PullRequest) (*appsv1.Deployment, err
 	if err != nil {
 		return nil, err
 	}
+	prinfo.commitID = pr.Spec.CommitID
 
 	labels := map[string]string{
 		"org":  prinfo.org,
@@ -115,7 +135,7 @@ func deploymentForPullRequest(pr *v1alpha1.PullRequest) (*appsv1.Deployment, err
 							Name:            "ttyd",
 							ImagePullPolicy: "Always",
 							Command:         []string{"/bin/bash"},
-							Args:            []string{"fetch_serve.sh", prinfo.host, prinfo.org, prinfo.repo, prinfo.pr},
+							Args:            prinfo.godocContainerArgs(),
 						},
 						{
 							Image:           "gcr.io/sunilarora-sandbox/ssh-client:0.0.2",
@@ -145,10 +165,11 @@ func addOwnerRefToObject(obj metav1.Object, ownerRef metav1.OwnerReference) {
 // prInfo is an structure to represent PullRequest info. It will be used
 // internally to more as an convenience for passing it around.
 type prInfo struct {
-	host string
-	org  string
-	repo string
-	pr   string
+	host     string
+	org      string
+	repo     string
+	pr       int64
+	commitID string
 }
 
 // parsePullRequestURL parses given PullRequest URL into prInfo instance.
@@ -164,15 +185,24 @@ func parsePullRequestURL(prURL string) (*prInfo, error) {
 		return nil, fmt.Errorf("pr info missing in the URL")
 	}
 
+	prNum, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+
 	return &prInfo{
 		host: u.Hostname(),
 		org:  parts[0],
 		repo: parts[1],
-		pr:   parts[3],
+		pr:   prNum,
 	}, nil
 }
 
 // helper function to generate subdomain for the prinfo.
 func (pr *prInfo) subdomain() string {
-	return fmt.Sprintf("%s-%s-pr-%s", pr.org, pr.repo, pr.pr)
+	return fmt.Sprintf("%s-%s-pr-%d", pr.org, pr.repo, pr.pr)
+}
+
+func (pr *prInfo) godocContainerArgs() []string {
+	return []string{"fetch_serve.sh", pr.host, pr.org, pr.repo, strconv.FormatInt(pr.pr, 10), pr.commitID}
 }
