@@ -53,7 +53,7 @@ func NewGithubSyncer(mgr manager.Manager) (*GithubSyncer, error) {
 }
 
 func (gs *GithubSyncer) Start(stop <-chan struct{}) {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(30 * time.Second)
 	for {
 		select {
 		case <-stop:
@@ -65,20 +65,80 @@ func (gs *GithubSyncer) Start(stop <-chan struct{}) {
 	}
 }
 
+// this function organizes all the PRs in the given list  by repos and orgs,
+// so that we can make  batch calls to GH.
+// { "kubernetes-sigs":
+//		{
+//			"controller-runtime": {
+//				21: "commit-id",
+//
+//			}
+//		}
+//	}
+func pullRequestByRepoAndOrg(prs *v1alpha1.PullRequestList) map[string]map[string]map[int64]string {
+	orgs := map[string]map[string]map[int64]string{}
+	for _, pr := range prs.Items {
+		prinfo, _ := parsePullRequestURL(pr.Spec.URL)
+		log.Printf("populating %v in the map", prinfo)
+		_, orgFound := orgs[prinfo.org]
+		if !orgFound {
+			orgs[prinfo.org] = map[string]map[int64]string{}
+		}
+		_, repoFound := orgs[prinfo.org][prinfo.repo]
+		if !repoFound {
+			orgs[prinfo.org][prinfo.repo] = map[int64]string{}
+		}
+		orgs[prinfo.org][prinfo.repo][prinfo.pr] = pr.Spec.CommitID
+	}
+	return orgs
+}
+
 func (gs *GithubSyncer) syncPullRequests() {
 	prList := &v1alpha1.PullRequestList{}
-	// get all the pull request CRs from k8s
+	// get pull requests in all namespaces
 	err := gs.mgr.GetClient().List(context.Background(), &client.ListOptions{Namespace: ""}, prList)
 	if err != nil {
 		log.Printf("error fetching all the PRs from k8s: %v", err)
 		return
 	}
 
-	for _, pr := range prList.Items {
-		if err = gs.syncPR(&pr); err != nil {
-			log.Printf("error syncing pr: %v", err)
+	orgs := pullRequestByRepoAndOrg(prList)
+	log.Printf("orgs map: %+v", orgs)
+
+	for org, repos := range orgs {
+		for repo, prs := range repos {
+			// for pr, commitID := range prs {
+			// 	log.Printf("org: %s repo:%s pr: %d commitID: %s \n", org, repo, pr, commitID)
+			// }
+			ghPRs, _, err := gs.ghClient.PullRequests.List(context.Background(), org, repo, nil)
+			if err != nil {
+				log.Printf("cannont get PR list from GH: %v", err)
+				continue
+			}
+			for _, ghPR := range ghPRs {
+				ghPRNum := int64(ghPR.GetNumber())
+				if commitID, found := prs[ghPRNum]; found {
+					// github PR found in our cluster
+					if ghPR.Head.GetSHA() != commitID {
+						// PR has been updated in GitHub
+						log.Printf("PR Updated: org: %s repo:%s pr: %d commitID: %s ghCommitID: %s \n", org, repo, ghPRNum, commitID, ghPR.Head.GetSHA())
+					} else {
+						log.Printf("PR is same: org: %s repo:%s pr: %d commitID: %s ghCommitID: %s \n", org, repo, ghPRNum, commitID, ghPR.Head.GetSHA())
+					}
+				} else {
+					log.Printf("PR not found: org: %s repo:%s pr: %d \n", org, repo, ghPRNum)
+				}
+			}
+			// TODO(droot): if a PR is not found in GH, it is closed, so we need to probably
+			// delete that PR from k8s cluster
 		}
 	}
+
+	// for _, pr := range prList.Items {
+	// 	if err = gs.syncPR(&pr); err != nil {
+	// 		log.Printf("error syncing pr: %v", err)
+	// 	}
+	// }
 }
 
 func (gs *GithubSyncer) syncPR(pr *v1alpha1.PullRequest) error {
@@ -109,9 +169,10 @@ func (r *GHPullRequestReconciler) Reconcile(request reconcile.Request) (reconcil
 	}
 
 	if pr.Spec.CommitID != "" {
-		// figure out the latest commit-id
+		// We already know the commit-id for the PR, so no need to update the commitID
 		return reconcile.Result{}, nil
 	}
+	// Looks like this is a fresh PR, so lets determine the latest commitID
 
 	prinfo, err := parsePullRequestURL(pr.Spec.URL)
 	if err != nil {
@@ -134,8 +195,5 @@ func (r *GHPullRequestReconciler) Reconcile(request reconcile.Request) (reconcil
 		log.Printf("error updating PR github: %v", err)
 		return reconcile.Result{}, err
 	}
-
-	// reconcile the dp with pr now.
-	// Print the ReplicaSet
 	return reconcile.Result{}, nil
 }
