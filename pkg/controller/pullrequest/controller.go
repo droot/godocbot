@@ -8,22 +8,69 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/droot/godocbot/pkg/apis/code/v1alpha1"
+	"github.com/kubernetes-sigs/controller-runtime/pkg/client"
+	"github.com/kubernetes-sigs/controller-runtime/pkg/controller"
+	"github.com/kubernetes-sigs/controller-runtime/pkg/handler"
+	"github.com/kubernetes-sigs/controller-runtime/pkg/manager"
+	"github.com/kubernetes-sigs/controller-runtime/pkg/reconcile"
+	"github.com/kubernetes-sigs/controller-runtime/pkg/source"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-
-	"github.com/droot/godocbot/pkg/apis/code/v1alpha1"
-	"github.com/kubernetes-sigs/controller-runtime/pkg/client"
-	"github.com/kubernetes-sigs/controller-runtime/pkg/reconcile"
 )
 
-type PullRequestReconciler struct {
+// GodocDeployer watches PullRequest object which have a commitID specified in
+// their Spec and deploys a Godoc deployment which runs godoc server for the PR.
+// It watches the PullRequest object for changes in commitID and reconciles the
+// generated godoc deployment.
+type GodocDeployer struct {
+	controller.Controller
+}
+
+func NewGodocDeployer(mgr manager.Manager) (*GodocDeployer, error) {
+	prReconciler := &pullRequestReconciler{
+		Client: mgr.GetClient(),
+	}
+
+	// Setup a new controller to Reconcile PullRequests
+	c, err := controller.New("pull-request-controller", mgr, controller.Options{Reconcile: prReconciler})
+	if err != nil {
+		return nil, err
+	}
+
+	// Watch PullRequest objects
+	err = c.Watch(
+		&source.Kind{Type: &v1alpha1.PullRequest{}},
+		&handler.Enqueue{})
+	if err != nil {
+		return nil, err
+	}
+
+	// Watch deployments generated for PullRequests objects
+	err = c.Watch(
+		&source.Kind{Type: &appsv1.Deployment{}},
+		&handler.EnqueueOwner{
+			OwnerType:    &v1alpha1.PullRequest{},
+			IsController: true,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &GodocDeployer{Controller: c}, nil
+}
+
+// pullRequestReconciler ensures there is a godoc deployment is running with
+// the commitID specified in the PullRequest object.
+type pullRequestReconciler struct {
 	Client client.Client
 }
 
-func (r *PullRequestReconciler) Reconcile(request reconcile.Request) (reconcile.Result, error) {
+func (r *pullRequestReconciler) Reconcile(request reconcile.Request) (reconcile.Result, error) {
 	ctx := context.Background()
 
 	log.Printf("reconciling request '%v'", request.NamespacedName)
@@ -85,9 +132,6 @@ func (r *PullRequestReconciler) Reconcile(request reconcile.Request) (reconcile.
 		}
 		log.Printf("godoc link updated successfully for pr %v", request.NamespacedName)
 	}
-
-	// reconcile the dp with pr now.
-	// Print the ReplicaSet
 	return reconcile.Result{}, nil
 }
 
@@ -132,7 +176,7 @@ func deploymentForPullRequest(pr *v1alpha1.PullRequest) (*appsv1.Deployment, err
 					Containers: []v1.Container{
 						{
 							Image:           "gcr.io/sunilarora-sandbox/godoc:0.0.1",
-							Name:            "ttyd",
+							Name:            "godoc",
 							ImagePullPolicy: "Always",
 							Command:         []string{"/bin/bash"},
 							Args:            prinfo.godocContainerArgs(),
